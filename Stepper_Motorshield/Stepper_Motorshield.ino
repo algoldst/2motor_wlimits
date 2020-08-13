@@ -11,6 +11,7 @@
 #include <Wire.h>
 #include <Adafruit_MotorShield.h>
 #include <Adafruit_PWMServoDriver.h>
+#include <AccelStepper.h>
 
 // Motor Constants
 const int stepsPerRevolution = 2048;  // Tells Stepper library how many steps = 1 revolution. 
@@ -48,9 +49,9 @@ void setup()
   AFMS.begin(); // Start the bottom shield
 
   // Motor 1
-  stepper1.setMaxSpeed(100.0);
+  stepper1.setMaxSpeed(600.0);
   stepper1.setAcceleration(100.0);
-  stepper1.moveTo(24);
+  stepper1.moveTo(2000);
     
   stepper2.setMaxSpeed(200.0);
   stepper2.setAcceleration(100.0);
