@@ -1,3 +1,65 @@
+/* Author: Alex Goldstein
+ *  
+ * Platform: Smraza Arduino UNO. 
+ *           Adafruit Motorshield v2.3
+ * 
+ * Software: Arduino IDE v1.8.13
+ * 
+ * Libraries: Adafruit Motorshield v2. Adafruit PWM Servo. Accelstepper. Arduino-timer. ElapsedMillis.
+ * These can all be installed via the IDE's "Manage Libraries".
+ * 
+ * Description: 
+ * This code controls an Arduino with Motorshield to run two bipolar stepper motors. Under typical operation, 
+ * the motors extend/retract their attached loads (in this case, boom arms) until full extension/retraction 
+ * is reached. This is determined either by limit switches or when the software's estimated motor positions 
+ * reach their targets. 
+ * 
+ * Targets are set by constants `boom1StepLength` and `boom2StepLength`, respectively.
+ * 
+ * Limit switches 1 & 3 correspond to Motor 1 to indicate full extension/retraction. Switches 2 & 4 act in the same fashion for Motor 2.
+ * 
+ * Activity is determined according to a Finite State Machine (FSM). States: {IN, MOVE_OUT, OUT, MOVE_IN}
+ * The FSM begins in the "IN" state with both motors at rest. When the Arduino receives a logic HIGH on its 
+ * HID Advance State pin, it advances to MOVE_OUT. Both motors begin turning until full extension is determined,
+ * as noted above. This places the FSM into the OUT state, where it waits for another HIGH signal on the same
+ * HID pin. Once received, it enters MOVE_IN and both motors turn backwards until full retraction is determined.
+ * At this point, the FSM moves back into the IN state, where it waits to repeat the process.
+ * 
+ * The Arduino also has three pins for LED output, which signal its current FSM state. Both static states (IN, OUT)
+ * are signified by a static LED (binary 100 or 001), while both MOVE states are signified by rapid LED flashes in
+ * a leftward or rightward drection (state-dependent). 
+ * 
+ * Outside of "typical" operation, the FSM also contains a user OVERRIDE state, which allows the user to move either 
+ * motor according to the positioning of a potentiometer. This potentiometer must be calibrated; this code assumes
+ * an OFF resistance of ____ and ON resistance of _____, with CENTER about ~______. When the potentiometer is 
+ * centered, the FSM does not enter OVERRIDE, but if it is turned to either extreme, the corresponding motor will turn 
+ * continuously backward or forward. This state is also signified by the LEDs going to an ALL ON state (binary 111).
+ * 
+ * Once the FSM has entered the OVERRIDE state, it can be "freed" back to normal operation by returning the
+ * potentiometer to center and pressing the HID State Advance button. The FSM resumes operation in the MOVE_OUT 
+ * state, to attempt full extension. To skip to a different state, the HID State Advance button may be pressed at
+ * any point in the typical operation.
+ * 
+ * Notes: 
+ *   Stepper used in testing is the 28BYJ-48 5V DC Motor. It has ~50 Ohms per phase. If using a more powerful motor,
+ *   the per-phase resistance will likely be ~1-3 Ohms. Eg. Typical NEMA17 motors. DO NOT connect a 5V supply,
+ *   as the Motorshield cannot current-limit. This will burn out the Motorshield, the motor, or both.
+ *   
+ *   You can safely power a low-impedance motor so long as the current is < 1.2A PER MOTOR. This is not the same
+ *   as the per-phase current. For a bipolar stepper, per-motor current = 2 * (per-phase current). 
+ *   
+ *   Do not use the Arduino power source. Use an external DC power supply, hooked to the Motorshield 5-12V ports.
+ *   Remove the VIN jumper **before** connecting the external power supply!
+ *   
+ *   Despite the above, because the motor will generate considerable back-EMF, even driving at Vin >> Vrated *might* 
+ *   be ok. Consider using an external driver such as a "chopper" driver, which senses the output current and "chops"
+ *   the voltage when necessary; alternatively, use a current-controlled power supply. (I have had success with a
+ *   current-limited buck converter.)
+ *   
+ *   
+ *   NS = Next State. PS = Present State.
+ */
+
 
 // Libraries
 // Motors
@@ -8,6 +70,7 @@
 
 // Timer
 #include <arduino-timer.h>
+#include <elapsedMillis.h>
 
 // ---------------------
 
@@ -42,8 +105,9 @@ void backwardstep2() {
   myStepper2->onestep(BACKWARD, DOUBLE);
 }
 
-// Now we'll wrap the 3 steppers in an AccelStepper object.
+// Now we'll wrap the 2 steppers in an AccelStepper object.
 // This will let us move the motors without blocking program flow.
+// Note: When using a driver, requires a different constructor that specifies driver in use.
 AccelStepper stepper1(forwardstep1, backwardstep1);
 AccelStepper stepper2(forwardstep2, backwardstep2);
 
@@ -53,9 +117,7 @@ AccelStepper stepper2(forwardstep2, backwardstep2);
 
 // States
 enum OpState{IN, MOVE_OUT, OUT, MOVE_IN, OVERRIDE}; // Starts in "IN" state
-OpState opState = IN;
-
-int doNothing = 0;  // Otherwise the compiler deletes parts of the code as "cleanup".
+OpState opState = IN; // Stores present state (PS)
 
 // Limit Switches
 bool limit1Pressed = false; // Limit Switches
@@ -64,6 +126,9 @@ bool limit3Pressed = false;
 bool limit4Pressed = false;
 // Note that limit1&2 both read from limit1&2Pins. 
 // Full implementation will require two additional switches. Could wire parallel to same pins?
+
+// HID Controller
+bool stateAdvancePressed = false;    // Button to move to next state.
 
 // Boom Arms & Motor Targets
   // Motor stepsPerRevolution defined above.
@@ -81,6 +146,10 @@ long target2;
 // Pins
 const int  limit1Pin = 2;    // Limit Switch 1
 const int  limit2Pin = 3;    // Limit Switch 2
+const int  limit3Pin = 2;     // Note: Change these to their own pins if you add limit switches 3&4!
+const int  limit4Pin = 3;
+
+const int  stateAdvancePin = 4;   // Tells program to move to next state. (Eg. To exit OUT / IN states.)
 
 const int  opStateLED1 = 5;   // LED to signify motor movement states
 const int  opStateLED2 = 6;
@@ -88,86 +157,124 @@ const int  opStateLED3 = 7;
 
 // -------------------------
 
+// Simple Debounce
+// Reads from `pin`. If it has been < `debounce_time` since last read, it returns 0.
+// Otherwise it will read the pin and return its value.
+// Also returns a boolean `ifNewReading` which returns 1 if a reading was taken, 0 if not; this is regardless of the read value.
+elapsedMillis timeElapsed = 1000;    // Auto-increments over time. Start at value >> debounce time.
+int debounceMillisRead(int pin, long debounceMillis, bool &ifNewReading) {
+  if (timeElapsed > debounceMillis) {    
+    ifNewReading = true;      // Record that a reading was taken
+    timeElapsed = 0;          // Reset timer for next debounce
+    return(digitalRead(pin)); // Return the read value.
+  }
+  else {            // Return false, don't read.
+    ifNewReading = false;     // Record that no reading was taken.
+    return(0);                // Return false regardless of pin value.
+  }
+}
 
-bool checkLimit() {
+bool stateLogic() {
+  
+  // Query HID State Advance button
+  bool dummyVar;
+  stateAdvancePressed = debounceMillisRead(stateAdvancePin, 250, dummyVar);
+  Serial.println(stateAdvancePressed);
+
+  // NS Logic
   switch(opState) {
     
     case IN:          // Boom arms fully retracted. Start state.
-      
-      if(millis() > 3000) {  // Wait 3sec before deploying.
-        // IN --> MOVE_OUT  State transition logic
-        opState = MOVE_OUT;
+      if(stateAdvancePressed) {
         
-        // Set motor 1&2 travel target
-        target1 = boom1StepLength;
-        target2 = boom2StepLength;
+        /* STL: IN --> MOVE_OUT */
+        // Reset NS flags
+        limit1Pressed = 0;            // Reset limit switch detection
+        limit2Pressed = 0;
+        stateAdvancePressed = false;  // Reset state advance flag
+
+        // State transition
+        opState = MOVE_OUT;
       }
       break;
-      
-    case MOVE_OUT:    // Boom arms deploying out
 
-      // Check limit switches and read value
+    /* STL: MOVE_OUT --> OUT */
+    case MOVE_OUT:
+      // NS Conditions: StateAdvance button pressed OR 
+      //                both motors have finished moving.
+      if( stateAdvancePressed ||
+          (stepper1.distanceToGo() == 0 && stepper2.distanceToGo() == 0) ) {
+        //updateStepper();    // Must call this **before** changing state!
+                            // Otherwise, stepper will continue in same direction for 1 cycle.
+
+        // Reset NS flags
+        stateAdvancePressed = false;
+
+        // State transition
+        opState = OUT;     
+      }
+      break;
+    
+    /* STL: OUT --> MOVE_IN */
+    case OUT:
+      if( stateAdvancePressed ) {
+        // Reset NS flags
+        stateAdvancePressed = false;
+        limit3Pressed = 0;
+        limit4Pressed = 0;
+
+        // State Transition
+        opState = MOVE_IN;
+      }
+      break;
+
+    /* STL: MOVE_IN --> IN */
+    case MOVE_IN:
+      // NS Conditions: 
+      if( stateAdvancePressed ||
+          (stepper1.distanceToGo() == 0 && stepper2.distanceToGo() == 0) ) {
+        //updateStepper();  // Call this **first** before changing state!
+                          // Motor needs to setSpeed(0)!
+
+        // Reset NS flags
+        stateAdvancePressed = false;
+
+        // State Transition
+        opState = IN;
+      }
+      break;
+  }
+  return(true);
+}
+
+bool checkLimits() {
+  switch(opState) {
+    
+    case IN:
+      // Do nothing.
+      break;
+      
+    case MOVE_OUT:
+      // Read limit switch values
       if(!limit1Pressed) {  // Limit switch 1
         limit1Pressed = digitalRead(limit1Pin); // Set limit1Pressed FLAG
-      } else { 
-        Serial.print("Limit1"); // Serial Monitor update when detected.
       }
       if(!limit2Pressed) {  // Limit switch 2
         limit2Pressed = digitalRead(limit2Pin); // Set limit2Pressed FLAG
-      } else {
-        Serial.print("Limit2"); // Serial Monitor update when detected.
-      }
-
-      // MOVE_OUT --> OUT
-      // State change / transition logic if both booms deployed
-      if(limit1Pressed && limit2Pressed) {
-        updateStepper();  // Call this **first** before changing state!
-        
-        opState = OUT;
-
-        // Reset Limit Switches (not used any more; we're only retracting afterward)
-        limit1Pressed = 0;
-        limit2Pressed = 0;
       }
       break;
 
-    case OUT:       // Boom arms fully deployed.
+    case OUT:
       // Do nothing.
-      delay(1000); // Blocking delay.
-
-      // OUT --> MOVE_IN
-      // State change / transition logic
-      opState = MOVE_IN;
-
-      target1 = 0;
-      target2 = 0;
-      
       break;
 
-    case MOVE_IN:    // Boom arms retracting in
-
+    case MOVE_IN:
       // Check limit switches and read value
       if(!limit3Pressed) {  // Limit switch 3
-        limit3Pressed = digitalRead(limit1Pin); // Set limit3Pressed FLAG
-      } else { 
-        Serial.print("Limit3"); // Serial Monitor update when detected.
+        limit3Pressed = digitalRead(limit3Pin); // Set limit3Pressed FLAG
       }
       if(!limit4Pressed) {  // Limit switch 4
-        limit4Pressed = digitalRead(limit2Pin); // Set limit4Pressed FLAG
-      } else {
-        Serial.print("Limit4"); // Serial Monitor update when detected.
-      }
-
-      // MOVE_IN --> IN
-      // State change logic if both booms retracted
-      if(limit3Pressed && limit4Pressed) {
-        updateStepper();  // Call this **first** before changing state!
-                          // Motor needs to setSpeed(0)!
-        opState = IN;
-
-        // Reset Limit Switches (not used any more; we're only extending afterward)
-        limit3Pressed = 0;
-        limit4Pressed = 0;
+        limit4Pressed = digitalRead(limit4Pin); // Set limit4Pressed FLAG
       }
       break;
   }
@@ -179,25 +286,28 @@ void updateStepper() {
   switch(opState) {
     
     case IN:      // Boom arm retracted. Start state.
+      // Set speed to 0.
+      // If we got to this state by HID AdvanceState, the motor will still be programmed with its previous speed.
+      stepper1.setSpeed(0);
+      stepper2.setSpeed(0);
+      
       stepper1.setCurrentPosition(0);   // Set START / HOME position as current position.
       stepper2.setCurrentPosition(0);
       break;
       
     case MOVE_OUT:   
-      // Check if limit switch hit; if not, move to target.      
+      // Check if limit switch hit; if so, stop moving.      
       if (limit1Pressed) {
-        stepper1.setSpeed(0);                         // Stop moving
-        target1 = stepper1.currentPosition();  // Set target as current position
-                
-        // Reset the limit switch
-        //limit1Pressed = false;
+        stepper1.setSpeed(0);                   // Stop moving
+        target1 = stepper1.currentPosition();   // Set target as current position
+      } else {
+        target1 = boom1StepLength;  // If not, then set the target to destination.
       }
       if (limit2Pressed) {
-        stepper2.setSpeed(0);                         // Stop moving
+        stepper2.setSpeed(0);                  // Stop moving
         target2 = stepper2.currentPosition();  // Set target as current position
-    
-        // Reset the limit switch
-        //limit2Pressed = false;
+      } else {
+        target2 = boom2StepLength;
       }
 
       // Set target movement & execute one motor "tick"
@@ -208,31 +318,38 @@ void updateStepper() {
       break;
 
     case OUT:
-      // Do nothing.
+      // Set speed to 0.
+      // If we got to this state by HID AdvanceState, the motor will still be programmed with its previous speed.
+      stepper1.setSpeed(0);
+      stepper2.setSpeed(0);
       break;
 
     case MOVE_IN:  
-      // Check if limit reached; if not, move to home.
+      // Check if limit reached; if so, stop moving.
       if (limit3Pressed) {
-        stepper1.setSpeed(0);                         // Stop moving
+        stepper1.setSpeed(0);                  // Stop moving
         target1 = stepper1.currentPosition();  // Set target as current position
                 
         // Reset the limit switch
         //limit1Pressed = false;
-      } 
+      } else {
+        target1 = 0;    // Same as before, if !limit then keep target destination as home.
+      }
       if (limit4Pressed) {
-        stepper2.setSpeed(0);                         // Stop moving
+        stepper2.setSpeed(0);                  // Stop moving
         target2 = stepper2.currentPosition();  // Set target as current position
     
         // Reset the limit switch
         //limit2Pressed = false;
+      } else {
+        target2 = 0;
       }
 
       // Set target movement & execute one motor "tick"
       stepper1.moveTo(target1);
       stepper2.moveTo(target2);
       stepper1.run(); 
-      stepper2.run();
+      stepper2.run();     // Note: run() is what updates distanceToGo().
       break;
   }
 }
@@ -245,8 +362,7 @@ void updateStepper() {
     // MOVE_IN: Cycle LEDs left
     // OVERRIDE: All LEDs ON
 bool opStateLEDBits[] = {1, 0, 0}; // "ON OFF OFF"
-
-void opStateIndicate() {
+bool opStateIndicate() {
   bool temp;
   
   switch(opState) {
@@ -268,9 +384,6 @@ void opStateIndicate() {
       digitalWrite(opStateLED2, opStateLEDBits[1]);
       digitalWrite(opStateLED3, opStateLEDBits[2]);
       
-//      Serial.print(opStateLEDBits[0]);
-//      Serial.print(opStateLEDBits[1]);
-//      Serial.println(opStateLEDBits[2]);
       break;
       
     case OUT:
@@ -291,9 +404,6 @@ void opStateIndicate() {
       digitalWrite(opStateLED2, opStateLEDBits[1]);
       digitalWrite(opStateLED3, opStateLEDBits[2]);
       
-//      Serial.print(opStateLEDBits[0]);
-//      Serial.print(opStateLEDBits[1]);
-//      Serial.println(opStateLEDBits[2]);
       break;
       
     case OVERRIDE:
@@ -302,7 +412,7 @@ void opStateIndicate() {
       digitalWrite(opStateLED3, HIGH);
       break;
   }
-  
+  return(true);
 }
 
 // -------------
@@ -312,11 +422,15 @@ void setup()
   // Serial Monitor
   Serial.begin(9600); // Start Serial Monitor
 
-  // Set Pins for Button
-  // initialize the button pin as a input:
+  // Set Pins for Limit Switches
   pinMode(limit1Pin, INPUT);
   pinMode(limit2Pin, INPUT);
+  pinMode(limit3Pin, INPUT);
+  pinMode(limit4Pin, INPUT);
 
+  // Set Pins for HID
+  pinMode(stateAdvancePin, INPUT);  // State Advance button
+  
   // Set Pins for LED
   pinMode(opStateLED1, OUTPUT);
   pinMode(opStateLED2, OUTPUT);
@@ -326,8 +440,8 @@ void setup()
   digitalWrite(opStateLED3, LOW);
 
   // Timer Setup
-  timer.every(100, checkLimit); // Limit Switch readings every __ ms
-  timer.every(120, opStateIndicate);  // Update LED indicators
+ // timer.every(100, checkLimit); // Limit Switch readings every __ ms
+  timer.every(150, opStateIndicate);  // Update LED indicators
 
   // Motor Setup
   AFMS.begin(); // Start the bottom shield
@@ -343,5 +457,10 @@ void setup()
 void loop()
 {
   timer.tick();
-  updateStepper();
+  checkLimits();      // Query limit switches
+  updateStepper();    // Update Stepper targets & move
+  // opStateIndicate();  // Flash LED indicators
+  
+  stateLogic();       // STL: State Transition Logic
+  
 }
