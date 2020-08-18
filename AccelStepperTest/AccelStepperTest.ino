@@ -124,8 +124,8 @@ int orPotVal = 50;    // Mapped from AnalogRead to value [0,100].
                       // 50  = No input (inactive)
                       // 0   = Move In
                       // 100 = Move Out
-const int orPotMinSS = 25;  // Threshold levels for leaving the "inactive" zone.
-const int orPotMaxSS = 75;
+const int orPotMinSS = 35;  // Threshold levels for leaving the "inactive" zone.
+const int orPotMaxSS = 65;
 
 // Limit Switches
 bool limit1Pressed = false; // Limit Switches
@@ -150,6 +150,9 @@ long target2;
 // For the motor I'm developing on, 2048 steps == 1 revolution, but other motors will be different.
 // Check the datasheet to see the gearing and step size : degrees ratios.
 
+// Stepper Motor Movement Parameters
+const int STEPPER_MAXSPEED = 250;
+const int STEPPER_ACCEL = 10;
 
 // Pins
 const int  limit1Pin = 2;     // Limit Switch 1
@@ -190,9 +193,9 @@ bool stateLogic() {
   stateAdvancePressed = debounceMillisRead(stateAdvancePin, 250, dummyVar);
 
   // Check HID Override Potentiometer
-  orPotVal = map(analogRead(orPotPin), 0, 100);   // Map Pot value to range (0-100)
-  Serial.println(orPotVal);
+  orPotVal = map(analogRead(orPotPin), 0,1023,  0,100);   // Map Pot value to range (0-100)
 
+  // If orPot isn't centered, throw to OVERRIDE
   if (orPotVal > orPotMaxSS || orPotVal < orPotMinSS) {
     opState = OVERRIDE;
   }
@@ -246,7 +249,7 @@ bool stateLogic() {
 
     /* STL: MOVE_IN --> IN */
     case MOVE_IN:
-      // NS Conditions: 
+      // NS Conditions: State Advance button is pressed, or BOTH steppers must reach their destinations.
       if( stateAdvancePressed ||
           (stepper1.distanceToGo() == 0 && stepper2.distanceToGo() == 0) ) {
         //updateStepper();  // Call this **first** before changing state!
@@ -262,7 +265,14 @@ bool stateLogic() {
 
     // STL: OVERRIDE --> OUT
     case OVERRIDE:
-      if( stateAdvancePressed ) {
+      // NS Conditions: orPot is centered AND State Advance button is pressed.
+      if( orPotVal > orPotMinSS && orPotVal < orPotMaxSS && stateAdvancePressed ) {
+        // Reset stepper movement parameters
+        stepper1.setMaxSpeed(STEPPER_MAXSPEED);
+        stepper1.setAcceleration(STEPPER_ACCEL);
+        stepper2.setMaxSpeed(STEPPER_MAXSPEED);
+        stepper2.setAcceleration(STEPPER_ACCEL);
+        
         opState = OUT;    // Return to OUT state so we hold whatever final positioning.
                           // This way, the motors will retract once operator hits button.
       }
@@ -311,6 +321,10 @@ void updateStepper() {
   switch(opState) {
     
     case IN:      // Boom arm retracted. Start state.
+      // Disable power to motors
+      stepper1.disableOutputs();
+      stepper2.disableOutputs();
+      
       // Set speed to 0.
       // If we got to this state by HID AdvanceState, the motor will still be programmed with its previous speed.
       stepper1.setSpeed(0);
@@ -321,6 +335,10 @@ void updateStepper() {
       break;
       
     case MOVE_OUT:   
+      // Enable power to motors
+      stepper1.enableOutputs();
+      stepper2.enableOutputs();
+      
       // Check if limit switch hit; if so, stop moving.      
       if (limit1Pressed) {
         stepper1.setSpeed(0);                   // Stop moving
@@ -343,6 +361,10 @@ void updateStepper() {
       break;
 
     case OUT:
+      // Disable power to motors
+      stepper1.disableOutputs();
+      stepper2.disableOutputs();
+      
       // Set speed to 0.
       // If we got to this state by HID AdvanceState, the motor will still be programmed with its previous speed.
       stepper1.setSpeed(0);
@@ -350,11 +372,15 @@ void updateStepper() {
       break;
 
     case MOVE_IN:  
+      // Enable power to motors
+      stepper1.enableOutputs();
+      stepper2.enableOutputs();
+
       // Check if limit reached; if so, stop moving.
       if (limit3Pressed) {
         stepper1.setSpeed(0);                  // Stop moving
         target1 = stepper1.currentPosition();  // Set target as current position
-                
+        
         // Reset the limit switch
         //limit1Pressed = false;
       } else {
@@ -369,7 +395,7 @@ void updateStepper() {
       } else {
         target2 = 0;
       }
-
+      
       // Set target movement & execute one motor "tick"
       stepper1.moveTo(target1);
       stepper2.moveTo(target2);
@@ -378,13 +404,26 @@ void updateStepper() {
       break;
 
     case OVERRIDE:
-      if (orPotVal > orPotMaxSS) {
-        stepper1.setMaxSpeed( map( orPotVal-orPotMaxSS,  1,100-orPotMaxSS,  100,500 ) );
-        Serial.println("MOVING OUT");
+      if (orPotVal > orPotMaxSS) {        // Move out
+        // Enable power to motors
+        stepper1.enableOutputs();
+        stepper2.enableOutputs();
+
+        // Move motors
+        stepper1.setSpeed( map( orPotVal-orPotMaxSS,  1,100-orPotMaxSS,  20,STEPPER_MAXSPEED ) );
       }
-      else if (orPotVal < orPotMinSS) {
-        Serial.println("MOVING IN");
+      else if (orPotVal < orPotMinSS) {   // Move in
+        // Enable power to motors
+        stepper1.enableOutputs();
+        stepper2.enableOutputs();
+
+        // Move motors
+        stepper1.setSpeed( map( orPotVal-orPotMinSS,  -orPotMinSS,-1,  -STEPPER_MAXSPEED,-20 ) );
       }
+      else {                              // Still in override, but no movement.
+        stepper1.setSpeed(0);
+      }
+      stepper1.runSpeed();
       break;
   }
 }
@@ -483,20 +522,27 @@ void setup()
   AFMS.begin(); // Start the bottom shield
 
   // Motor 1
-  stepper1.setMaxSpeed(500.0);
-  stepper1.setAcceleration(300.0);      // For testing: change this value lower in implementation.
+  stepper1.setMaxSpeed(STEPPER_MAXSPEED);
+  stepper1.setAcceleration(STEPPER_ACCEL);      // For testing: change this value lower in implementation.
   // Motor 2
-  stepper2.setMaxSpeed(500.0);
-  stepper2.setAcceleration(300.0);      // For testing: change this value lower in implementation.
+  stepper2.setMaxSpeed(STEPPER_MAXSPEED);
+  stepper2.setAcceleration(STEPPER_ACCEL);      // For testing: change this value lower in implementation.
 }
 
 void loop()
 {
-  timer.tick();
+  timer.tick();       // Runs LED flashes, orPot query(?)
   checkLimits();      // Query limit switches
   updateStepper();    // Update Stepper targets & move
-  // opStateIndicate();  // Flash LED indicators
   
   stateLogic();       // STL: State Transition Logic
+  //Serial.println(millis());
+  Serial.print(stepper1.currentPosition());
+  Serial.print(" ");
+  Serial.print(target1);
+  Serial.print(" ");
+  Serial.print(stepper1.distanceToGo());
+  Serial.print(" ");
+  Serial.println(stepper1.speed());
   
 }
