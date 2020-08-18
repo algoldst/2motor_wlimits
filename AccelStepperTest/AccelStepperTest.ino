@@ -151,8 +151,8 @@ long target2;
 // Check the datasheet to see the gearing and step size : degrees ratios.
 
 // Stepper Motor Movement Parameters
-const int STEPPER_MAXSPEED = 250;
-const int STEPPER_ACCEL = 10;
+const int STEPPER_MAXSPEED = 46;
+const int STEPPER_ACCEL = 5;
 
 // Pins
 const int  limit1Pin = 2;     // Limit Switch 1
@@ -186,11 +186,23 @@ int debounceMillisRead(int pin, long debounceMillis, bool &ifNewReading) {
   }
 }
 
+int debounceMillisReadRelease(int pin, long debounceMillis, bool &ifNewReading) {
+  if (timeElapsed > debounceMillis) {    
+    ifNewReading = true;      // Record that a reading was taken
+    timeElapsed = 0;          // Reset timer for next debounce
+    return(digitalRead(pin)); // Return the read value.
+  }
+  else {            // Return false, don't read.
+    ifNewReading = false;     // Record that no reading was taken.
+    return(0);                // Return false regardless of pin value.
+  }
+}
+
 bool stateLogic() {
   
   // Query HID State Advance button
   bool dummyVar;
-  stateAdvancePressed = debounceMillisRead(stateAdvancePin, 250, dummyVar);
+  stateAdvancePressed = debounceMillisRead(stateAdvancePin, 350, dummyVar);
 
   // Check HID Override Potentiometer
   orPotVal = map(analogRead(orPotPin), 0,1023,  0,100);   // Map Pot value to range (0-100)
@@ -222,7 +234,7 @@ bool stateLogic() {
       // NS Conditions: StateAdvance button pressed OR 
       //                both motors have finished moving.
       if( stateAdvancePressed ||
-          (stepper1.distanceToGo() == 0 && stepper2.distanceToGo() == 0) ) {
+                              (stepper1.distanceToGo() == 0 && stepper2.distanceToGo() == 0) ) {
         //updateStepper();    // Must call this **before** changing state!
                             // Otherwise, stepper will continue in same direction for 1 cycle.
 
@@ -251,9 +263,7 @@ bool stateLogic() {
     case MOVE_IN:
       // NS Conditions: State Advance button is pressed, or BOTH steppers must reach their destinations.
       if( stateAdvancePressed ||
-          (stepper1.distanceToGo() == 0 && stepper2.distanceToGo() == 0) ) {
-        //updateStepper();  // Call this **first** before changing state!
-                          // Motor needs to setSpeed(0)!
+                              (stepper1.distanceToGo() == 0 && stepper2.distanceToGo() == 0) ) {
 
         // Reset NS flags
         stateAdvancePressed = false;
@@ -267,11 +277,8 @@ bool stateLogic() {
     case OVERRIDE:
       // NS Conditions: orPot is centered AND State Advance button is pressed.
       if( orPotVal > orPotMinSS && orPotVal < orPotMaxSS && stateAdvancePressed ) {
-        // Reset stepper movement parameters
-        stepper1.setMaxSpeed(STEPPER_MAXSPEED);
-        stepper1.setAcceleration(STEPPER_ACCEL);
-        stepper2.setMaxSpeed(STEPPER_MAXSPEED);
-        stepper2.setAcceleration(STEPPER_ACCEL);
+        // Reset NS flags
+        stateAdvancePressed = false;
         
         opState = OUT;    // Return to OUT state so we hold whatever final positioning.
                           // This way, the motors will retract once operator hits button.
@@ -327,11 +334,17 @@ void updateStepper() {
       
       // Set speed to 0.
       // If we got to this state by HID AdvanceState, the motor will still be programmed with its previous speed.
-      stepper1.setSpeed(0);
-      stepper2.setSpeed(0);
+      stepper1.setSpeed(0);                   // Stop moving
+      stepper2.setSpeed(0);                   
+      target1 = 0;                            // Set target as current position
+      target2 = 0;
+      stepper1.setCurrentPosition(target1);   // Set START / HOME position as current position.
+      stepper2.setCurrentPosition(target2);
+      stepper1.moveTo(target1);               // Move to current position
+      stepper2.moveTo(target2);
+      stepper1.run();                         // Run (do nothing)
+      stepper2.run();
       
-      stepper1.setCurrentPosition(0);   // Set START / HOME position as current position.
-      stepper2.setCurrentPosition(0);
       break;
       
     case MOVE_OUT:   
@@ -368,7 +381,13 @@ void updateStepper() {
       // Set speed to 0.
       // If we got to this state by HID AdvanceState, the motor will still be programmed with its previous speed.
       stepper1.setSpeed(0);
-      stepper2.setSpeed(0);
+      stepper2.setSpeed(0);                   // Stop moving
+      target1 = stepper1.currentPosition();   // Set target as current position
+      target2 = stepper2.currentPosition();
+      stepper1.moveTo(target1);               // Move to current position
+      stepper2.moveTo(target2);
+      stepper1.run();                         // Run (do nothing)
+      stepper2.run();
       break;
 
     case MOVE_IN:  
@@ -410,7 +429,7 @@ void updateStepper() {
         stepper2.enableOutputs();
 
         // Move motors
-        stepper1.setSpeed( map( orPotVal-orPotMaxSS,  1,100-orPotMaxSS,  20,STEPPER_MAXSPEED ) );
+        stepper1.setSpeed( map( orPotVal-orPotMaxSS,  1,100-orPotMaxSS,  1,STEPPER_MAXSPEED ) );
       }
       else if (orPotVal < orPotMinSS) {   // Move in
         // Enable power to motors
@@ -418,7 +437,7 @@ void updateStepper() {
         stepper2.enableOutputs();
 
         // Move motors
-        stepper1.setSpeed( map( orPotVal-orPotMinSS,  -orPotMinSS,-1,  -STEPPER_MAXSPEED,-20 ) );
+        stepper1.setSpeed( map( orPotVal-orPotMinSS,  -orPotMinSS,-1,  -STEPPER_MAXSPEED,-1 ) );
       }
       else {                              // Still in override, but no movement.
         stepper1.setSpeed(0);
