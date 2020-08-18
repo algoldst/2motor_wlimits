@@ -119,6 +119,14 @@ AccelStepper stepper2(forwardstep2, backwardstep2);
 enum OpState{IN, MOVE_OUT, OUT, MOVE_IN, OVERRIDE}; // Starts in "IN" state
 OpState opState = IN; // Stores present state (PS)
 
+// Override Potentiometer
+int orPotVal = 50;    // Mapped from AnalogRead to value [0,100].
+                      // 50  = No input (inactive)
+                      // 0   = Move In
+                      // 100 = Move Out
+const int orPotMinSS = 25;  // Threshold levels for leaving the "inactive" zone.
+const int orPotMaxSS = 75;
+
 // Limit Switches
 bool limit1Pressed = false; // Limit Switches
 bool limit2Pressed = false;
@@ -144,12 +152,13 @@ long target2;
 
 
 // Pins
-const int  limit1Pin = 2;    // Limit Switch 1
-const int  limit2Pin = 3;    // Limit Switch 2
+const int  limit1Pin = 2;     // Limit Switch 1
+const int  limit2Pin = 3;     // Limit Switch 2
 const int  limit3Pin = 2;     // Note: Change these to their own pins if you add limit switches 3&4!
 const int  limit4Pin = 3;
 
 const int  stateAdvancePin = 4;   // Tells program to move to next state. (Eg. To exit OUT / IN states.)
+const int orPotPin = 0;             // Potentiometer in Analog0, controls Motor override movement
 
 const int  opStateLED1 = 5;   // LED to signify motor movement states
 const int  opStateLED2 = 6;
@@ -179,7 +188,14 @@ bool stateLogic() {
   // Query HID State Advance button
   bool dummyVar;
   stateAdvancePressed = debounceMillisRead(stateAdvancePin, 250, dummyVar);
-  Serial.println(stateAdvancePressed);
+
+  // Check HID Override Potentiometer
+  orPotVal = map(analogRead(orPotPin), 0, 100);   // Map Pot value to range (0-100)
+  Serial.println(orPotVal);
+
+  if (orPotVal > orPotMaxSS || orPotVal < orPotMinSS) {
+    opState = OVERRIDE;
+  }
 
   // NS Logic
   switch(opState) {
@@ -243,9 +259,18 @@ bool stateLogic() {
         opState = IN;
       }
       break;
+
+    // STL: OVERRIDE --> OUT
+    case OVERRIDE:
+      if( stateAdvancePressed ) {
+        opState = OUT;    // Return to OUT state so we hold whatever final positioning.
+                          // This way, the motors will retract once operator hits button.
+      }
+      break;
   }
   return(true);
 }
+
 
 bool checkLimits() {
   switch(opState) {
@@ -351,6 +376,16 @@ void updateStepper() {
       stepper1.run(); 
       stepper2.run();     // Note: run() is what updates distanceToGo().
       break;
+
+    case OVERRIDE:
+      if (orPotVal > orPotMaxSS) {
+        stepper1.setMaxSpeed( map( orPotVal-orPotMaxSS,  1,100-orPotMaxSS,  100,500 ) );
+        Serial.println("MOVING OUT");
+      }
+      else if (orPotVal < orPotMinSS) {
+        Serial.println("MOVING IN");
+      }
+      break;
   }
 }
 
@@ -430,6 +465,7 @@ void setup()
 
   // Set Pins for HID
   pinMode(stateAdvancePin, INPUT);  // State Advance button
+  pinMode(orPotPin, INPUT);         // Override Potentiometer
   
   // Set Pins for LED
   pinMode(opStateLED1, OUTPUT);
