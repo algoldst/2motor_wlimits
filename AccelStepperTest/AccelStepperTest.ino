@@ -1,6 +1,6 @@
 /* Author: Alex Goldstein
  *  
- * Platform: Smraza Arduino UNO. 
+ * Platform: Smraza Arduino UNO | Curie Genuino 101
  *           Adafruit Motorshield v2.3
  * 
  * Software: Arduino IDE v1.8.13
@@ -30,10 +30,9 @@
  * a leftward or rightward drection (state-dependent). 
  * 
  * Outside of "typical" operation, the FSM also contains a user OVERRIDE state, which allows the user to move either 
- * motor according to the positioning of a potentiometer. This potentiometer must be calibrated; this code assumes
- * an OFF resistance of ____ and ON resistance of _____, with CENTER about ~______. When the potentiometer is 
- * centered, the FSM does not enter OVERRIDE, but if it is turned to either extreme, the corresponding motor will turn 
- * continuously backward or forward. This state is also signified by the LEDs going to an ALL ON state (binary 111).
+ * motor according to the positioning of a potentiometer. When the potentiometer is centered, the FSM does not 
+ * enter OVERRIDE, but if it is turned to either extreme, the corresponding motor will turn continuously backward or 
+ * forward. This state is also signified by the LEDs going to an ALL ON state (binary 111).
  * 
  * Once the FSM has entered the OVERRIDE state, it can be "freed" back to normal operation by returning the
  * potentiometer to center and pressing the HID State Advance button. The FSM resumes operation in the MOVE_OUT 
@@ -49,7 +48,7 @@
  *   as the per-phase current. For a bipolar stepper, per-motor current = 2 * (per-phase current). 
  *   
  *   Do not use the Arduino power source. Use an external DC power supply, hooked to the Motorshield 5-12V ports.
- *   Remove the VIN jumper **before** connecting the external power supply!
+ *   Remove the VIN jumper from the Motorshield **before** connecting the external power supply!
  *   
  *   Despite the above, because the motor will generate considerable back-EMF, even driving at Vin >> Vrated *might* 
  *   be ok. Consider using an external driver such as a "chopper" driver, which senses the output current and "chops"
@@ -69,21 +68,14 @@
 #include <AccelStepper.h>
 
 // Timer
-#include <arduino-timer.h>
 #include <elapsedMillis.h>
-
-// ---------------------
-
-
-// Timer Setup
-Timer<10> timer; // 10 concurrent tasks, using millis as resolution
 
 // ---------------------
 
 
 // Motor Setup
 const int stepsPerRevolution = 2048;  // Tells Stepper library how many steps = 1 revolution. 
-                                      // (Needed for motor speed bc this sets RPMs.)
+                                      // (Needed for motor speed bc this sets logical RPMs.)
 
 // Create MotorShield and Motor objects
 Adafruit_MotorShield AFMS = Adafruit_MotorShield(); 
@@ -91,7 +83,7 @@ Adafruit_StepperMotor *myStepper1 = AFMS.getStepper(stepsPerRevolution, 1); // M
 Adafruit_StepperMotor *myStepper2 = AFMS.getStepper(stepsPerRevolution, 2); // M3 M4 stepper
 
 // Motor Function Wrappers
-// you can change these to DOUBLE or INTERLEAVE or MICROSTEP!
+// You can change these to DOUBLE or INTERLEAVE or MICROSTEP, but this works for me.
 void forwardstep1() {  
   myStepper1->onestep(FORWARD, SINGLE);
 }
@@ -107,7 +99,7 @@ void backwardstep2() {
 
 // Now we'll wrap the 2 steppers in an AccelStepper object.
 // This will let us move the motors without blocking program flow.
-// Note: When using a driver, requires a different constructor that specifies driver in use.
+// Note: When using a driver, requires a different constructor that specifies the driver is in use.
 AccelStepper stepper1(forwardstep1, backwardstep1);
 AccelStepper stepper2(forwardstep2, backwardstep2);
 
@@ -120,10 +112,11 @@ enum OpState{IN, MOVE_OUT, OUT, MOVE_IN, OVERRIDE}; // Starts in "IN" state
 OpState opState = IN; // Stores present state (PS)
 
 // Override Potentiometer
-int orPotVal = 50;    // Mapped from AnalogRead to value [0,100].
+int orPot1Val = 50;    // Mapped from AnalogRead to value [0,100].
                       // 50  = No input (inactive)
                       // 0   = Move In
                       // 100 = Move Out
+int orPot2Val = 50;   
 const int orPotMinSS = 35;  // Threshold levels for leaving the "inactive" zone.
 const int orPotMaxSS = 65;
 
@@ -151,17 +144,21 @@ long target2;
 // Check the datasheet to see the gearing and step size : degrees ratios.
 
 // Stepper Motor Movement Parameters
-const int STEPPER_MAXSPEED = 46;
-const int STEPPER_ACCEL = 5;
+const int STEPPER_MAXSPEED = 46;  // Too high and the motor will "slip" -- you'll notice it won't turn any faster
+                                  // for higher MAXSPEED values, but the program logic doesn't know this and will
+                                  // think it's turning faster than it is. For me, 46 was the max speed that made
+                                  // any difference to output speed.
+const int STEPPER_ACCEL = 5;      // How quickly it speeds up / slows down. These are in units of steps/sec^2
 
 // Pins
-const int  limit1Pin = 2;     // Limit Switch 1
-const int  limit2Pin = 3;     // Limit Switch 2
-const int  limit3Pin = 2;     // Note: Change these to their own pins if you add limit switches 3&4!
-const int  limit4Pin = 3;
+const int  limit1Pin = 2;     // Limit Switch 1  (Outgoing Limit, Motor 1)
+const int  limit2Pin = 3;     // Limit Switch 2  (Outgoing Limit, Motor 2)
+const int  limit3Pin = 8;     // Limit Switch 3  (Incoming Limit, Motor 1)
+const int  limit4Pin = 9;     // Limit Switch 4  (Incoming Limit, Motor 2)
 
 const int  stateAdvancePin = 4;   // Tells program to move to next state. (Eg. To exit OUT / IN states.)
-const int orPotPin = 0;             // Potentiometer in Analog0, controls Motor override movement
+const int orPot1Pin = 0;             // Potentiometer in Analog0, controls Motor 1 override movement
+const int orPot2Pin = 1;             // Potentiometer in Analog1, controls Motor 2 override movement
 
 const int  opStateLED1 = 5;   // LED to signify motor movement states
 const int  opStateLED2 = 6;
@@ -198,17 +195,18 @@ int debounceMillisReadRelease(int pin, long debounceMillis, bool &ifNewReading) 
   }
 }
 
-bool stateLogic() {
+void stateLogic() {
   
   // Query HID State Advance button
   bool dummyVar;
   stateAdvancePressed = debounceMillisRead(stateAdvancePin, 350, dummyVar);
 
   // Check HID Override Potentiometer
-  orPotVal = map(analogRead(orPotPin), 0,1023,  0,100);   // Map Pot value to range (0-100)
+  orPot1Val = map(analogRead(orPot1Pin), 0,1023,  0,100);   // Map Pot value to range (0-100)
+  orPot2Val = map(analogRead(orPot2Pin), 0,1023,  0,100);   // Map Pot value to range (0-100)
 
-  // If orPot isn't centered, throw to OVERRIDE
-  if (orPotVal > orPotMaxSS || orPotVal < orPotMinSS) {
+  // If either orPot isn't centered, throw to OVERRIDE
+  if (orPot1Val > orPotMaxSS || orPot1Val < orPotMinSS || orPot1Val > orPotMaxSS || orPot1Val < orPotMinSS) {
     opState = OVERRIDE;
   }
 
@@ -235,8 +233,6 @@ bool stateLogic() {
       //                both motors have finished moving.
       if( stateAdvancePressed ||
                               (stepper1.distanceToGo() == 0 && stepper2.distanceToGo() == 0) ) {
-        //updateStepper();    // Must call this **before** changing state!
-                            // Otherwise, stepper will continue in same direction for 1 cycle.
 
         // Reset NS flags
         stateAdvancePressed = false;
@@ -276,7 +272,7 @@ bool stateLogic() {
     // STL: OVERRIDE --> OUT
     case OVERRIDE:
       // NS Conditions: orPot is centered AND State Advance button is pressed.
-      if( orPotVal > orPotMinSS && orPotVal < orPotMaxSS && stateAdvancePressed ) {
+      if( orPot1Val > orPotMinSS && orPot1Val < orPotMaxSS && orPot2Val > orPotMinSS && orPot2Val < orPotMaxSS && stateAdvancePressed ) {
         // Reset NS flags
         stateAdvancePressed = false;
         
@@ -285,11 +281,10 @@ bool stateLogic() {
       }
       break;
   }
-  return(true);
 }
 
 
-bool checkLimits() {
+void checkLimits() {
   switch(opState) {
     
     case IN:
@@ -319,9 +314,11 @@ bool checkLimits() {
         limit4Pressed = digitalRead(limit4Pin); // Set limit4Pressed FLAG
       }
       break;
+      
+    default:
+      break;     // Do nothing.
   }
-
-  return(true); // Return value tells timer to keep looping or not. Keep returning TRUE.
+  return;
 }
 
 void updateStepper() {
@@ -423,26 +420,48 @@ void updateStepper() {
       break;
 
     case OVERRIDE:
-      if (orPotVal > orPotMaxSS) {        // Move out
+      // ORPOT 1 / MOTOR 1
+      if (orPot1Val > orPotMaxSS) {        // Move out
         // Enable power to motors
         stepper1.enableOutputs();
-        stepper2.enableOutputs();
 
         // Move motors
-        stepper1.setSpeed( map( orPotVal-orPotMaxSS,  1,100-orPotMaxSS,  1,STEPPER_MAXSPEED ) );
+        stepper1.setSpeed( map( orPot1Val-orPotMaxSS,  1,100-orPotMaxSS,  1,STEPPER_MAXSPEED ) );
       }
-      else if (orPotVal < orPotMinSS) {   // Move in
+      else if (orPot1Val < orPotMinSS) {   // Move in
         // Enable power to motors
         stepper1.enableOutputs();
-        stepper2.enableOutputs();
 
         // Move motors
-        stepper1.setSpeed( map( orPotVal-orPotMinSS,  -orPotMinSS,-1,  -STEPPER_MAXSPEED,-1 ) );
+        stepper1.setSpeed( map( orPot1Val-orPotMinSS,  -orPotMinSS,-1,  -STEPPER_MAXSPEED,-1 ) );
       }
       else {                              // Still in override, but no movement.
         stepper1.setSpeed(0);
       }
       stepper1.runSpeed();
+
+
+      // ORPOT 2 / MOTOR 2
+      if (orPot2Val > orPotMaxSS) {        // Move out
+        // Enable power to motors
+        stepper2.enableOutputs();
+
+        // Move motors
+        stepper2.setSpeed( map( orPot2Val-orPotMaxSS,  1,100-orPotMaxSS,  1,STEPPER_MAXSPEED ) );
+      }
+      else if (orPot1Val < orPotMinSS) {   // Move in
+        // Enable power to motors
+        stepper2.enableOutputs();
+
+        // Move motors
+        stepper2.setSpeed( map( orPot2Val-orPotMinSS,  -orPotMinSS,-1,  -STEPPER_MAXSPEED,-1 ) );
+      }
+      else {                              // Still in override, but no movement.
+        stepper2.setSpeed(0);
+      }
+      stepper2.runSpeed();
+
+      
       break;
   }
 }
@@ -455,7 +474,7 @@ void updateStepper() {
     // MOVE_IN: Cycle LEDs left
     // OVERRIDE: All LEDs ON
 bool opStateLEDBits[] = {1, 0, 0}; // "ON OFF OFF"
-bool opStateIndicate() {
+void opStateIndicate() {
   bool temp;
   
   switch(opState) {
@@ -505,7 +524,6 @@ bool opStateIndicate() {
       digitalWrite(opStateLED3, HIGH);
       break;
   }
-  return(true);
 }
 
 // -------------
@@ -523,7 +541,8 @@ void setup()
 
   // Set Pins for HID
   pinMode(stateAdvancePin, INPUT);  // State Advance button
-  pinMode(orPotPin, INPUT);         // Override Potentiometer
+  pinMode(orPot1Pin, INPUT);        // Override Potentiometers 1&2
+  pinMode(orPot2Pin, INPUT);
   
   // Set Pins for LED
   pinMode(opStateLED1, OUTPUT);
@@ -532,10 +551,6 @@ void setup()
   digitalWrite(opStateLED1, LOW);
   digitalWrite(opStateLED2, LOW);
   digitalWrite(opStateLED3, LOW);
-
-  // Timer Setup
- // timer.every(100, checkLimit); // Limit Switch readings every __ ms
-  timer.every(150, opStateIndicate);  // Update LED indicators
 
   // Motor Setup
   AFMS.begin(); // Start the bottom shield
@@ -548,20 +563,39 @@ void setup()
   stepper2.setAcceleration(STEPPER_ACCEL);      // For testing: change this value lower in implementation.
 }
 
+elapsedMillis ledTimer = 1000;  // For sequencing LEDs
 void loop()
 {
-  timer.tick();       // Runs LED flashes, orPot query(?)
+  // Update LED indicators @ 150ms intervals
+  if(ledTimer > 150) {
+    opStateIndicate();
+    ledTimer = 0;       // Reset timer
+  }
+
+  // Update movement
   checkLimits();      // Query limit switches
   updateStepper();    // Update Stepper targets & move
-  
+
+  // Check FSM State
   stateLogic();       // STL: State Transition Logic
-  //Serial.println(millis());
+
+  // Debug Output to Serial Monitor
+  Serial.print("Motor 1: ");
   Serial.print(stepper1.currentPosition());
   Serial.print(" ");
   Serial.print(target1);
   Serial.print(" ");
   Serial.print(stepper1.distanceToGo());
   Serial.print(" ");
-  Serial.println(stepper1.speed());
+  Serial.print(stepper1.speed());
+  
+  Serial.print(" ||  Motor 2: ");
+  Serial.print(stepper2.currentPosition());
+  Serial.print(" ");
+  Serial.print(target2);
+  Serial.print(" ");
+  Serial.print(stepper2.distanceToGo());
+  Serial.print(" ");
+  Serial.println(stepper2.speed());
   
 }
