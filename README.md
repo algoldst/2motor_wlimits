@@ -14,4 +14,5 @@ The full program runs two Stepper motors in coordination with the following:
 - `Stepper_Motorshield`: Adapts the basic sketch for running a Stepper motor, using the Motorshield v2.3.
 - `AccelStepper_Motorshield`: Full program that runs two Stepper motors using a Motorshield and AccelStepper library. 
 
-
+## Wiring Diagram
+<img src="Wiring Diagram/Wiring Diagram.png">
